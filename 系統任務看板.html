@@ -51,7 +51,28 @@
   button.danger:hover{ background:#fecaca; }
   button.link-btn{ background:none; color:var(--accent); padding:0; font-size:16px; text-decoration:underline; }
 
+  .toolbar button.sync-btn{ background:#0f766e; color:#fff; }
+  .toolbar button.sync-btn:hover{ background:#0d9488; }
+  #sync-status{
+    font-size:14px; color:#cbd5e1; display:inline-flex; align-items:center; gap:6px;
+    white-space:nowrap; max-width:260px; overflow:hidden; text-overflow:ellipsis;
+  }
+  #sync-status.ok{ color:#86efac; }
+  #sync-status.bad{ color:#fca5a5; }
+  #sync-status .sync-dot{ width:8px; height:8px; border-radius:50%; background:currentColor; flex:0 0 auto; }
+  #btn-unlink{ background:none; color:#94a3b8; padding:2px 4px; font-size:14px; text-decoration:underline; }
+  #btn-unlink:hover{ color:#e2e8f0; }
+
   main{ padding:16px 20px 60px; max-width:1400px; margin:0 auto; }
+
+  #restore-banner{
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+    background:#fffbeb; border:1px solid #fcd34d; color:#92400e;
+    padding:12px 16px; border-radius:8px; margin-bottom:16px; font-size:15px;
+  }
+  #restore-banner strong{ font-weight:600; }
+  #restore-banner button{ background:var(--accent); color:#fff; padding:6px 14px; font-size:15px; }
+  #restore-banner button:hover{ background:var(--accent-hover); }
 
   table{ width:100%; border-collapse:collapse; background:var(--panel); border-radius:8px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.06); }
   thead th{
@@ -199,6 +220,10 @@
     <input type="text" id="search" placeholder="搜尋系統 / 工程師 / 任務內容">
     <button id="btn-add" class="primary">＋ 新增任務</button>
     <button id="btn-settings">設定</button>
+    <button id="btn-open-backup" class="sync-btn hidden">📂 開啟連動檔</button>
+    <button id="btn-new-backup" class="sync-btn hidden">🆕 新建連動檔</button>
+    <span id="sync-status" class="hidden"></span>
+    <button id="btn-unlink" class="hidden">取消連結</button>
     <button id="btn-export">匯出備份</button>
     <button id="btn-import">匯入備份</button>
     <input type="file" id="file-import" accept="application/json" class="hidden">
@@ -206,6 +231,10 @@
 </header>
 
 <main>
+  <div id="restore-banner" class="hidden">
+    <span>📂 <strong>目前尚無資料。</strong>若您之前已建立連動備份檔，請點右方按鈕開啟以還原資料；否則可用「新建連動檔」建立一個自動備份檔案。</span>
+    <button id="btn-restore-open">開啟連動檔還原</button>
+  </div>
   <table id="board">
     <thead>
       <tr>
@@ -313,6 +342,13 @@ let quickAddSystem = null;
 let pendingGlowId = null;
 let pendingHistoryGlowId = null;
 
+// ---------- 連動備份檔案（File System Access API）----------
+const fsApiSupported = ('showOpenFilePicker' in window) && ('showSaveFilePicker' in window);
+let fileHandle = null;      // 目前連結的檔案 handle
+let autoSyncReady = false;  // 是否可自動寫入
+let writing = false;        // 寫入中旗標（並發鎖）
+let dirty = false;          // 寫入期間又有變更
+
 function loadData(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -322,6 +358,7 @@ function loadData(){
 }
 function saveData(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  if(autoSyncReady) writeToFile();   // fire-and-forget，內部有並發鎖
 }
 function todayStr(){
   return new Date().toISOString().slice(0,10);
@@ -785,6 +822,20 @@ document.getElementById('btn-clear-all').onclick = () => {
 };
 
 // ---------- 匯出 / 匯入 ----------
+// 驗證並正規化匯入/讀回的資料物件（供手動匯入與連動檔開啟共用）
+function normalizeImportedData(parsed){
+  if(!parsed || !parsed.systems || !parsed.engineers || !parsed.tasks){
+    throw new Error('格式不符');
+  }
+  return {
+    systems: parsed.systems || [],
+    engineers: parsed.engineers || [],
+    tasks: parsed.tasks || [],
+    overdueDays: parsed.overdueDays || 7,
+    nextId: parsed.nextId || ((parsed.tasks||[]).reduce((m,t)=>Math.max(m,t.id||0),0) + 1)
+  };
+}
+
 document.getElementById('btn-export').onclick = () => {
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -807,17 +858,9 @@ document.getElementById('file-import').addEventListener('change', e => {
   reader.onload = evt => {
     try{
       const parsed = JSON.parse(evt.target.result);
-      if(!parsed.systems || !parsed.engineers || !parsed.tasks){
-        throw new Error('格式不符');
-      }
+      const normalized = normalizeImportedData(parsed);
       if(!confirm('匯入將覆蓋目前所有資料，確定要繼續嗎？')) return;
-      data = {
-        systems: parsed.systems || [],
-        engineers: parsed.engineers || [],
-        tasks: parsed.tasks || [],
-        overdueDays: parsed.overdueDays || 7,
-        nextId: parsed.nextId || ((parsed.tasks||[]).reduce((m,t)=>Math.max(m,t.id||0),0) + 1)
-      };
+      data = normalized;
       saveData();
       renderAll();
       alert('匯入完成。');
@@ -828,6 +871,151 @@ document.getElementById('file-import').addEventListener('change', e => {
   };
   reader.readAsText(file);
 });
+
+// ---------- 連動備份檔案 ----------
+function dataIsEmpty(){
+  return data.systems.length === 0 && data.engineers.length === 0 && data.tasks.length === 0;
+}
+
+// 依目前狀態更新工具列的同步顯示
+function updateSyncStatus(errMsg){
+  const openBtn   = document.getElementById('btn-open-backup');
+  const newBtn    = document.getElementById('btn-new-backup');
+  const statusEl  = document.getElementById('sync-status');
+  const unlinkBtn = document.getElementById('btn-unlink');
+
+  if(!fsApiSupported){
+    // 不支援的瀏覽器：隱藏所有連動 UI（改用匯出/匯入）
+    openBtn.classList.add('hidden');
+    newBtn.classList.add('hidden');
+    statusEl.classList.add('hidden');
+    unlinkBtn.classList.add('hidden');
+    return;
+  }
+
+  openBtn.classList.remove('hidden');
+  newBtn.classList.remove('hidden');
+
+  if(autoSyncReady && fileHandle){
+    statusEl.classList.remove('hidden');
+    statusEl.className = 'ok';
+    statusEl.innerHTML = `<span class="sync-dot"></span>自動備份中：${escapeHtml(fileHandle.name)}`;
+    unlinkBtn.classList.remove('hidden');
+  } else if(errMsg){
+    statusEl.classList.remove('hidden');
+    statusEl.className = 'bad';
+    statusEl.innerHTML = `<span class="sync-dot"></span>${escapeHtml(errMsg)}`;
+    unlinkBtn.classList.add('hidden');
+  } else {
+    statusEl.classList.add('hidden');
+    unlinkBtn.classList.add('hidden');
+  }
+}
+
+// 顯示/隱藏還原橫幅：資料為空且尚未連結時提示開檔還原
+function updateRestoreBanner(){
+  const banner = document.getElementById('restore-banner');
+  if(fsApiSupported && !autoSyncReady && dataIsEmpty()){
+    banner.classList.remove('hidden');
+  } else {
+    banner.classList.add('hidden');
+  }
+}
+
+// 把目前資料寫回連動檔（並發鎖，避免快速連續變更時串流重疊）
+async function writeToFile(){
+  if(!fileHandle || !autoSyncReady) return;
+  if(writing){ dirty = true; return; }
+  writing = true;
+  try{
+    const writable = await fileHandle.createWritable();
+    await writable.write(JSON.stringify(data, null, 2));
+    await writable.close();
+  }catch(err){
+    autoSyncReady = false;
+    updateSyncStatus('寫入失敗，請重新開啟連動檔');
+    updateRestoreBanner();
+    writing = false;
+    return;
+  }
+  writing = false;
+  if(dirty){ dirty = false; writeToFile(); }
+}
+
+// 開啟既有連動檔：讀回資料 + 建立自動寫入連結
+async function openBackupFile(){
+  if(!fsApiSupported) return;
+  let handle;
+  try{
+    [handle] = await window.showOpenFilePicker({
+      types:[{ description:'JSON 備份檔', accept:{ 'application/json':['.json'] } }],
+      multiple:false
+    });
+  }catch(err){ return; }  // 使用者取消
+
+  let normalized;
+  try{
+    const file = await handle.getFile();
+    const text = await file.text();
+    normalized = normalizeImportedData(JSON.parse(text));
+  }catch(err){
+    alert('讀取失敗：檔案格式不正確，無法作為連動檔。');
+    return;
+  }
+
+  if(!dataIsEmpty()){
+    if(!confirm('開啟連動檔將以「檔案內容」覆蓋目前畫面上的資料，確定要繼續嗎？')) return;
+  }
+
+  try{
+    if(handle.requestPermission){
+      const perm = await handle.requestPermission({ mode:'readwrite' });
+      if(perm !== 'granted'){
+        alert('未取得檔案寫入權限，無法建立自動備份連結。');
+        return;
+      }
+    }
+  }catch(err){ /* 部分環境無 requestPermission，仍嘗試寫入 */ }
+
+  data = normalized;
+  fileHandle = handle;
+  autoSyncReady = true;
+  saveData();           // 寫回 localStorage + 觸發一次檔案寫入
+  renderAll();
+  updateSyncStatus();
+  updateRestoreBanner();
+}
+
+// 新建連動檔：建立新檔並開始自動寫入目前資料
+async function newBackupFile(){
+  if(!fsApiSupported) return;
+  let handle;
+  try{
+    handle = await window.showSaveFilePicker({
+      suggestedName:'系統任務看板_連動備份.json',
+      types:[{ description:'JSON 備份檔', accept:{ 'application/json':['.json'] } }]
+    });
+  }catch(err){ return; }  // 使用者取消
+
+  fileHandle = handle;
+  autoSyncReady = true;
+  await writeToFile();    // 立即寫入目前資料
+  updateSyncStatus();
+  updateRestoreBanner();
+}
+
+// 取消連結（停止自動寫入，資料仍保留在畫面/localStorage）
+function unlinkBackup(){
+  fileHandle = null;
+  autoSyncReady = false;
+  updateSyncStatus();
+  updateRestoreBanner();
+}
+
+document.getElementById('btn-open-backup').onclick = openBackupFile;
+document.getElementById('btn-new-backup').onclick = newBackupFile;
+document.getElementById('btn-restore-open').onclick = openBackupFile;
+document.getElementById('btn-unlink').onclick = unlinkBackup;
 
 // ---------- 日期篩選器 ----------
 document.getElementById('filter-date-from').addEventListener('change', renderHistory);
@@ -840,6 +1028,8 @@ document.getElementById('btn-clear-datefilter').onclick = () => {
 
 // ---------- 初始化 ----------
 renderAll();
+updateSyncStatus();
+updateRestoreBanner();
 
 </script>
 </body>
