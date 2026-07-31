@@ -103,6 +103,7 @@
 
   .engineer-tag{ font-weight:500; }
   .date-mono{ font-family:var(--mono); font-size:16px; color:#475569; }
+  .urgent-content{ color:var(--bad); font-weight:700; }
 
   .row-actions{ display:flex; gap:6px; white-space:nowrap; }
   .row-actions button{ padding:5px 10px; font-size:16px; }
@@ -291,6 +292,10 @@
     <label>指派日期
       <input type="date" id="f-date">
     </label>
+    <label class="chk-line" style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" id="f-urgent" style="width:auto; margin:0;">
+      <span>標示為緊急（任務內容以紅字顯示）</span>
+    </label>
     <div class="modal-actions">
       <button id="btn-delete-task" class="danger hidden">刪除此任務</button>
       <button id="btn-cancel-task">取消</button>
@@ -469,7 +474,7 @@ function renderBoard(){
       if(idx === 0) cells += sysCellHtml;
       cells += `
         <td class="status-cell"><span class="dot dot-${sev}"></span>${sevLabel}</td>
-        <td>${escapeHtml(t.content)}</td>
+        <td class="${t.urgent ? 'urgent-content' : ''}">${escapeHtml(t.content)}</td>
         <td class="engineer-tag">${escapeHtml(t.engineer)}</td>
         <td class="date-mono">${t.assignDate}</td>
         <td class="row-actions">
@@ -525,7 +530,7 @@ function renderHistory(){
     tr.dataset.taskId = t.id;
     tr.innerHTML = `
       <td>${escapeHtml(t.system)}</td>
-      <td>${escapeHtml(t.content)}</td>
+      <td class="${t.urgent ? 'urgent-content' : ''}">${escapeHtml(t.content)}</td>
       <td>${escapeHtml(t.engineer)}</td>
       <td class="date-mono">${t.assignDate}</td>
       <td class="date-mono">${t.completeDate || ''}</td>
@@ -585,6 +590,7 @@ function openTaskModal(task){
     document.getElementById('f-engineer').value = task.engineer;
     document.getElementById('f-content').value = task.content;
     document.getElementById('f-date').value = task.assignDate;
+    document.getElementById('f-urgent').checked = !!task.urgent;
     document.getElementById('btn-delete-task').classList.remove('hidden');
   } else {
     editingTaskId = null;
@@ -592,6 +598,7 @@ function openTaskModal(task){
     if(quickAddSystem) document.getElementById('f-system').value = quickAddSystem;
     document.getElementById('f-content').value = '';
     document.getElementById('f-date').value = todayStr();
+    document.getElementById('f-urgent').checked = false;
     document.getElementById('btn-delete-task').classList.add('hidden');
   }
   taskOverlay.classList.remove('hidden');
@@ -609,6 +616,7 @@ document.getElementById('btn-save-task').onclick = () => {
   const engineer = document.getElementById('f-engineer').value;
   const content = document.getElementById('f-content').value.trim();
   const assignDate = document.getElementById('f-date').value || todayStr();
+  const urgent = document.getElementById('f-urgent').checked;
 
   if(!content){
     alert('請填寫任務內容。');
@@ -618,12 +626,12 @@ document.getElementById('btn-save-task').onclick = () => {
   let resultId;
   if(editingTaskId){
     const t = data.tasks.find(x => x.id === editingTaskId);
-    if(t){ t.system=system; t.engineer=engineer; t.content=content; t.assignDate=assignDate; }
+    if(t){ t.system=system; t.engineer=engineer; t.content=content; t.assignDate=assignDate; t.urgent=urgent; }
     resultId = editingTaskId;
   } else {
     const newTask = {
       id: data.nextId++,
-      system, engineer, content, assignDate,
+      system, engineer, content, assignDate, urgent,
       completed:false, completeDate:null
     };
     data.tasks.push(newTask);
