@@ -339,6 +339,28 @@
   </div>
 </div>
 
+<!-- 未連結備份檔時的鎖定遮罩 -->
+<div class="overlay hidden" id="lock-overlay">
+  <div class="modal">
+    <h2>🔒 請先連結備份檔案</h2>
+    <p style="font-size:15px; color:#334155; line-height:1.6; margin:0 0 8px;">
+      本工具的資料在瀏覽器關閉後可能被清空，<strong>檔案是唯一能長期保存的地方</strong>。
+      為避免忘記開檔而遺失變更，請先完成連結再開始編輯：
+    </p>
+    <ul style="font-size:15px; color:#334155; line-height:1.7; margin:0 0 16px; padding-left:20px;">
+      <li>已有備份檔 → 點「開啟連動檔」還原並開始自動備份</li>
+      <li>第一次使用 → 點「新建連動檔」建立檔案</li>
+    </ul>
+    <div class="modal-actions" style="justify-content:flex-start; gap:8px; flex-wrap:wrap;">
+      <button id="btn-lock-open" class="primary">📂 開啟連動檔</button>
+      <button id="btn-lock-new" class="primary">🆕 新建連動檔</button>
+    </div>
+    <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);">
+      <button id="btn-lock-bypass" class="link-btn">暫不連結，直接使用（本次變更不會自動備份）</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const STORAGE_KEY = 'sysboard_data_v1';
 let data = loadData();
@@ -353,6 +375,7 @@ let fileHandle = null;      // 目前連結的檔案 handle
 let autoSyncReady = false;  // 是否可自動寫入
 let writing = false;        // 寫入中旗標（並發鎖）
 let dirty = false;          // 寫入期間又有變更
+let lockBypassed = false;   // 使用者是否選擇「暫不連結」略過鎖定
 
 function loadData(){
   try{
@@ -930,6 +953,13 @@ function updateRestoreBanner(){
   }
 }
 
+// 未連結備份檔時，用全螢幕遮罩鎖住編輯，強制先開檔（可刻意略過）
+function updateLock(){
+  const overlay = document.getElementById('lock-overlay');
+  const shouldLock = fsApiSupported && !autoSyncReady && !lockBypassed;
+  overlay.classList.toggle('hidden', !shouldLock);
+}
+
 // 把目前資料寫回連動檔（並發鎖，避免快速連續變更時串流重疊）
 async function writeToFile(){
   if(!fileHandle || !autoSyncReady) return;
@@ -992,6 +1022,7 @@ async function openBackupFile(){
   renderAll();
   updateSyncStatus();
   updateRestoreBanner();
+  updateLock();
 }
 
 // 新建連動檔：建立新檔並開始自動寫入目前資料
@@ -1010,18 +1041,27 @@ async function newBackupFile(){
   await writeToFile();    // 立即寫入目前資料
   updateSyncStatus();
   updateRestoreBanner();
+  updateLock();
 }
 
 // 取消連結（停止自動寫入，資料仍保留在畫面/localStorage）
 function unlinkBackup(){
   fileHandle = null;
   autoSyncReady = false;
+  lockBypassed = true;    // 主動取消連結視為刻意選擇，不再立即鎖定
   updateSyncStatus();
   updateRestoreBanner();
+  updateLock();
 }
 
 document.getElementById('btn-open-backup').onclick = openBackupFile;
 document.getElementById('btn-new-backup').onclick = newBackupFile;
+document.getElementById('btn-lock-open').onclick = openBackupFile;
+document.getElementById('btn-lock-new').onclick = newBackupFile;
+document.getElementById('btn-lock-bypass').onclick = () => {
+  lockBypassed = true;
+  updateLock();
+};
 document.getElementById('btn-restore-open').onclick = openBackupFile;
 document.getElementById('btn-unlink').onclick = unlinkBackup;
 
@@ -1038,6 +1078,7 @@ document.getElementById('btn-clear-datefilter').onclick = () => {
 renderAll();
 updateSyncStatus();
 updateRestoreBanner();
+updateLock();
 
 </script>
 </body>
