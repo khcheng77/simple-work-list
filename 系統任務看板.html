@@ -208,6 +208,29 @@
   .edit-list li button{ background:none; color:#b91c1c; font-size:16px; padding:0 4px; line-height:1; }
   .settings-row{ font-size:16px; padding-top:8px; border-top:1px solid var(--border); }
 
+  .report-range{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+  .report-range label{ font-size:15px; color:var(--muted); margin:0; }
+  .report-range input[type="date"]{
+    padding:6px 8px; border:1px solid var(--border); border-radius:6px; font-size:15px; background:#fff;
+  }
+  .report-range button{ background:#e2e8f0; color:var(--text); padding:6px 12px; font-size:15px; }
+  #report-preview{
+    max-height:52vh; overflow-y:auto; border:1px solid var(--border); border-radius:8px;
+    padding:16px 18px; background:#f8fafc; font-size:15px; line-height:1.6;
+  }
+  #report-preview h3{ margin:14px 0 6px; font-size:15px; color:var(--text); text-transform:none; letter-spacing:0; }
+  #report-preview h3:first-child{ margin-top:0; }
+  .rep-summary{ display:flex; gap:18px; flex-wrap:wrap; font-size:16px; font-weight:600; margin-bottom:4px; }
+  .rep-summary .rep-num-bad{ color:var(--bad); }
+  .rep-summary .rep-num-ok{ color:var(--accent); }
+  #report-preview ul{ margin:0 0 4px; padding-left:20px; }
+  #report-preview li{ margin:2px 0; }
+  .rep-overdue-item{ color:var(--bad); }
+  .rep-table{ border-collapse:collapse; font-size:14px; margin:2px 0 6px; }
+  .rep-table th, .rep-table td{ border:1px solid var(--border); padding:3px 10px; text-align:left; }
+  .rep-table th{ background:#eef2f7; font-weight:600; }
+  .rep-empty{ color:var(--muted); }
+
   @media (max-width:760px){
     .settings-grid{ grid-template-columns:1fr; }
     thead th{ top:0; }
@@ -226,6 +249,7 @@
     <button id="btn-new-backup" class="sync-btn hidden">🆕 新建連動檔</button>
     <span id="sync-status" class="hidden"></span>
     <button id="btn-unlink" class="hidden">取消連結</button>
+    <button id="btn-report">📊 產生報告</button>
     <button id="btn-export">匯出備份</button>
     <button id="btn-import">匯入備份</button>
     <input type="file" id="file-import" accept="application/json" class="hidden">
@@ -361,6 +385,27 @@
     </div>
     <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border);">
       <button id="btn-lock-bypass" class="link-btn">暫不連結，直接使用（本次變更不會自動備份）</button>
+    </div>
+  </div>
+</div>
+
+<!-- 產生報告 -->
+<div class="overlay hidden" id="report-overlay">
+  <div class="modal modal-wide">
+    <h2>產生報告</h2>
+    <div class="report-range">
+      <label>完成日期區間</label>
+      <input type="date" id="rep-from" title="起始日期">
+      <span class="filter-sep">—</span>
+      <input type="date" id="rep-to" title="結束日期">
+      <button id="btn-rep-clear">清除</button>
+      <span style="font-size:14px; color:var(--muted);">（留空＝不限；逾期為目前即時狀態）</span>
+    </div>
+    <div id="report-preview"></div>
+    <div class="modal-actions" style="margin-top:14px;">
+      <button id="btn-rep-copy" style="margin-right:auto; background:var(--accent); color:#fff;">📋 複製為純文字</button>
+      <button id="btn-rep-csv">⬇ 下載 CSV</button>
+      <button id="btn-close-report" class="primary">關閉</button>
     </div>
   </div>
 </div>
@@ -1090,6 +1135,170 @@ document.getElementById('btn-lock-bypass').onclick = () => {
 };
 document.getElementById('btn-restore-open').onclick = openBackupFile;
 document.getElementById('btn-unlink').onclick = unlinkBackup;
+
+// ---------- 產生報告 ----------
+const reportOverlay = document.getElementById('report-overlay');
+
+function repRangeText(r){
+  if(r.from && r.to) return `${r.from} ~ ${r.to}`;
+  if(r.from) return `${r.from} 起`;
+  if(r.to)   return `至 ${r.to}`;
+  return '全部期間';
+}
+
+// 依日期區間彙整報告資料（完成＝依完成日在區間內；逾期＝目前即時狀態）
+function buildReport(from, to){
+  const completed = data.tasks
+    .filter(t => t.completed)
+    .filter(t => {
+      const d = t.completeDate || '';
+      if(from && d < from) return false;
+      if(to && d > to) return false;
+      return true;
+    })
+    .sort((a,b) => (a.completeDate||'').localeCompare(b.completeDate||''));
+
+  const overdue = data.tasks
+    .filter(t => !t.completed && severityOf(t) === 3)
+    .sort((a,b) => a.system.localeCompare(b.system, 'zh-Hant'));
+
+  const inProgress = data.tasks.filter(t => !t.completed).length;
+
+  const bySystem = {};    // 系統 -> {done, overdue}
+  const byEngineer = {};  // 工程師 -> 完成件數
+  completed.forEach(t => {
+    (bySystem[t.system] = bySystem[t.system] || {done:0, overdue:0}).done++;
+    byEngineer[t.engineer] = (byEngineer[t.engineer] || 0) + 1;
+  });
+  overdue.forEach(t => {
+    (bySystem[t.system] = bySystem[t.system] || {done:0, overdue:0}).overdue++;
+  });
+
+  return { from, to, completed, overdue, inProgress, bySystem, byEngineer };
+}
+
+function renderReportPreview(){
+  const r = buildReport(document.getElementById('rep-from').value, document.getElementById('rep-to').value);
+
+  const doneList = r.completed.length
+    ? '<ul>' + r.completed.map(t =>
+        `<li>[${escapeHtml(t.system)}] ${escapeHtml(t.content)} — ${escapeHtml(t.engineer)}（${t.completeDate||''} 完成）</li>`
+      ).join('') + '</ul>'
+    : '<p class="rep-empty">此區間無完成任務。</p>';
+
+  const overdueList = r.overdue.length
+    ? '<ul>' + r.overdue.map(t =>
+        `<li class="rep-overdue-item">[${escapeHtml(t.system)}] ${escapeHtml(t.content)} — ${escapeHtml(t.engineer)}（${escapeHtml(statusLabel(t,3))}${t.dueDate?`，期限 ${t.dueDate}`:''}）</li>`
+      ).join('') + '</ul>'
+    : '<p class="rep-empty">目前沒有逾期任務。</p>';
+
+  const sysRows = Object.keys(r.bySystem).sort((a,b)=>a.localeCompare(b,'zh-Hant')).map(s =>
+    `<tr><td>${escapeHtml(s)}</td><td>${r.bySystem[s].done}</td><td>${r.bySystem[s].overdue}</td></tr>`
+  ).join('');
+  const sysTable = sysRows
+    ? `<table class="rep-table"><thead><tr><th>系統</th><th>完成</th><th>逾期</th></tr></thead><tbody>${sysRows}</tbody></table>`
+    : '<p class="rep-empty">無資料。</p>';
+
+  const engRows = Object.keys(r.byEngineer).sort((a,b)=>r.byEngineer[b]-r.byEngineer[a]).map(e =>
+    `<tr><td>${escapeHtml(e)}</td><td>${r.byEngineer[e]}</td></tr>`
+  ).join('');
+  const engTable = engRows
+    ? `<table class="rep-table"><thead><tr><th>工程師</th><th>本區間完成</th></tr></thead><tbody>${engRows}</tbody></table>`
+    : '<p class="rep-empty">無資料。</p>';
+
+  document.getElementById('report-preview').innerHTML = `
+    <h3>系統任務報告（${escapeHtml(repRangeText(r))}）</h3>
+    <div class="rep-summary">
+      <span>本區間完成：<span class="rep-num-ok">${r.completed.length}</span> 件</span>
+      <span>目前逾期：<span class="rep-num-bad">${r.overdue.length}</span> 件</span>
+      <span>進行中：${r.inProgress} 件</span>
+    </div>
+    <h3>本區間完成（${r.completed.length}）</h3>${doneList}
+    <h3>目前逾期（${r.overdue.length}）</h3>${overdueList}
+    <h3>依系統統計</h3>${sysTable}
+    <h3>依工程師統計（完成件數）</h3>${engTable}
+  `;
+}
+
+// 純文字版（供複製貼進郵件）
+function reportPlainText(){
+  const r = buildReport(document.getElementById('rep-from').value, document.getElementById('rep-to').value);
+  const L = [];
+  L.push(`系統任務報告（${repRangeText(r)}）`, '');
+  L.push(`■ 本區間完成：${r.completed.length} 件`);
+  L.push(`■ 目前逾期：${r.overdue.length} 件`);
+  L.push(`■ 進行中：${r.inProgress} 件`, '');
+  L.push('【本區間完成】');
+  if(r.completed.length) r.completed.forEach(t => L.push(`- [${t.system}] ${t.content} — ${t.engineer}（${t.completeDate||''} 完成）`));
+  else L.push('（無）');
+  L.push('', '【目前逾期】');
+  if(r.overdue.length) r.overdue.forEach(t => L.push(`- [${t.system}] ${t.content} — ${t.engineer}（${statusLabel(t,3)}${t.dueDate?`，期限 ${t.dueDate}`:''}）`));
+  else L.push('（無）');
+  L.push('', '【依系統統計】');
+  Object.keys(r.bySystem).sort((a,b)=>a.localeCompare(b,'zh-Hant')).forEach(s => L.push(`- ${s}：完成 ${r.bySystem[s].done} 件、逾期 ${r.bySystem[s].overdue} 件`));
+  L.push('', '【依工程師統計（完成件數）】');
+  Object.keys(r.byEngineer).sort((a,b)=>r.byEngineer[b]-r.byEngineer[a]).forEach(e => L.push(`- ${e}：${r.byEngineer[e]} 件`));
+  return L.join('\n');
+}
+
+// CSV（UTF-8 BOM，供 Excel 開啟）
+function csvCell(v){
+  const s = (v===null || v===undefined) ? '' : String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+}
+function reportCsv(){
+  const r = buildReport(document.getElementById('rep-from').value, document.getElementById('rep-to').value);
+  const rows = [['類別','系統','任務內容','負責工程師','指派日期','期限','完成日期','狀態備註']];
+  r.completed.forEach(t => rows.push(['本區間完成', t.system, t.content, t.engineer, t.assignDate, t.dueDate||'', t.completeDate||'', '已完成']));
+  r.overdue.forEach(t => rows.push(['目前逾期', t.system, t.content, t.engineer, t.assignDate, t.dueDate||'', '', statusLabel(t,3)]));
+  return rows.map(row => row.map(csvCell).join(',')).join('\r\n');
+}
+function downloadReportCsv(){
+  const blob = new Blob(['﻿' + reportCsv()], {type:'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().slice(0,10).replace(/-/g,'');
+  a.href = url; a.download = `系統任務報告_${ts}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function flashCopied(){
+  const btn = document.getElementById('btn-rep-copy');
+  const old = btn.textContent;
+  btn.textContent = '✓ 已複製';
+  setTimeout(() => { btn.textContent = old; }, 1500);
+}
+async function copyReport(){
+  const text = reportPlainText();
+  try{
+    await navigator.clipboard.writeText(text);
+    flashCopied();
+  }catch(e){
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    let ok = false;
+    try{ ok = document.execCommand('copy'); }catch(err){}
+    document.body.removeChild(ta);
+    ok ? flashCopied() : alert('複製失敗，請手動選取報告內容。');
+  }
+}
+
+document.getElementById('btn-report').onclick = () => {
+  renderReportPreview();
+  reportOverlay.classList.remove('hidden');
+};
+document.getElementById('btn-close-report').onclick = () => reportOverlay.classList.add('hidden');
+document.getElementById('rep-from').addEventListener('change', renderReportPreview);
+document.getElementById('rep-to').addEventListener('change', renderReportPreview);
+document.getElementById('btn-rep-clear').onclick = () => {
+  document.getElementById('rep-from').value = '';
+  document.getElementById('rep-to').value = '';
+  renderReportPreview();
+};
+document.getElementById('btn-rep-copy').onclick = copyReport;
+document.getElementById('btn-rep-csv').onclick = downloadReportCsv;
 
 // ---------- 日期篩選器 ----------
 document.getElementById('filter-date-from').addEventListener('change', renderHistory);
