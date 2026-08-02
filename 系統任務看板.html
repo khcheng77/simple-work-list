@@ -103,6 +103,7 @@
 
   .engineer-tag{ font-weight:500; }
   .date-mono{ font-family:var(--mono); font-size:16px; color:#475569; }
+  .due-line{ font-size:13px; color:var(--muted); margin-top:2px; }
   .urgent-content{ color:var(--bad); font-weight:700; }
 
   .row-actions{ display:flex; gap:6px; white-space:nowrap; }
@@ -292,6 +293,9 @@
     <label>指派日期
       <input type="date" id="f-date">
     </label>
+    <label>期限（可留空，留空則套用全域門檻）
+      <input type="date" id="f-duedate">
+    </label>
     <label class="chk-line" style="display:flex; align-items:center; gap:8px;">
       <input type="checkbox" id="f-urgent" style="width:auto; margin:0;">
       <span>標示為緊急（任務內容以紅字顯示）</span>
@@ -330,7 +334,7 @@
       <label style="display:inline;">逾期提醒門檻(天)：
         <input type="number" id="f-overdue-days" min="1" style="width:60px; display:inline-block;">
       </label>
-      <span style="color:var(--muted); font-size:16px;">（超過此天數未完成的任務會以紅色標示）</span>
+      <span style="color:var(--muted); font-size:16px;">（未設定個別「期限」的任務，超過此天數會以紅色標示）</span>
     </div>
     <div class="modal-actions">
       <button id="btn-clear-all" class="danger" style="margin-right:auto;">清除全部資料</button>
@@ -396,11 +400,31 @@ function daysSince(dateStr){
   const d2 = new Date(todayStr() + 'T00:00:00');
   return Math.max(0, Math.round((d2-d1)/(1000*60*60*24)));
 }
-function severity(days){
-  const t = data.overdueDays || 7;
-  if(days >= t) return 3;
-  if(days >= Math.ceil(t/2)) return 2;
+function daysBetween(fromStr, toStr){
+  const d1 = new Date(fromStr + 'T00:00:00');
+  const d2 = new Date(toStr + 'T00:00:00');
+  return Math.round((d2 - d1)/(1000*60*60*24));   // 可為負
+}
+// 每個任務的門檻（天）：有填期限用「指派日→期限」的天數，否則用全域 overdueDays
+function taskThreshold(t){
+  if(t.dueDate) return Math.max(1, daysBetween(t.assignDate, t.dueDate));
+  return data.overdueDays || 7;
+}
+function severityLevel(days, thr){
+  if(days >= thr) return 3;
+  if(days >= Math.ceil(thr/2)) return 2;
   return 1;
+}
+function severityOf(t){ return severityLevel(daysSince(t.assignDate), taskThreshold(t)); }
+function statusLabel(t, sev){
+  const days = daysSince(t.assignDate);
+  if(t.dueDate){
+    const remain = daysBetween(todayStr(), t.dueDate);      // 期限 - 今天
+    if(remain > 0) return `剩 ${remain} 天`;
+    if(remain === 0) return `今天到期`;
+    return `逾期 ${-remain} 天`;
+  }
+  return sev===3 ? `已逾期 ${days} 天` : `已 ${days} 天`;
 }
 function severityColor(sev){
   return sev===3 ? 'var(--bad)' : sev===2 ? 'var(--warn)' : sev===1 ? 'var(--ok)' : 'var(--idle)';
@@ -445,7 +469,7 @@ function renderBoard(){
 
   // 依嚴重度排序：紅 > 橙 > 綠 > 閒置
   groups.forEach(g => {
-    g.maxSev = g.tasks.reduce((m,t) => Math.max(m, severity(daysSince(t.assignDate))), 0);
+    g.maxSev = g.tasks.reduce((m,t) => Math.max(m, severityOf(t)), 0);
   });
   groups.sort((a,b) => {
     if(b.maxSev !== a.maxSev) return b.maxSev - a.maxSev;
@@ -464,7 +488,7 @@ function renderBoard(){
 
     // dots：用全部進行中任務(不受搜尋過濾)顯示總覽
     const dotsHtml = g.tasks.length
-      ? g.tasks.map(t => `<span class="dot dot-${severity(daysSince(t.assignDate))}"></span>`).join('')
+      ? g.tasks.map(t => `<span class="dot dot-${severityOf(t)}"></span>`).join('')
       : `<span class="dot dot-0"></span>`;
 
     const sysCellHtml = `
@@ -489,9 +513,8 @@ function renderBoard(){
       const tr = document.createElement('tr');
       tr.dataset.taskId = t.id;
       if(idx === shown.length - 1) tr.className = 'group-end';
-      const days = daysSince(t.assignDate);
-      const sev = severity(days);
-      const sevLabel = sev===3 ? `已逾期 ${days} 天` : `已 ${days} 天`;
+      const sev = severityOf(t);
+      const sevLabel = statusLabel(t, sev);
 
       let cells = '';
       if(idx === 0) cells += sysCellHtml;
@@ -499,7 +522,7 @@ function renderBoard(){
         <td class="status-cell"><span class="dot dot-${sev}"></span>${sevLabel}</td>
         <td class="${t.urgent ? 'urgent-content' : ''}">${escapeHtml(t.content)}</td>
         <td class="engineer-tag">${escapeHtml(t.engineer)}</td>
-        <td class="date-mono">${t.assignDate}</td>
+        <td class="date-mono">${t.assignDate}${t.dueDate ? `<div class="due-line">期限 ${t.dueDate}</div>` : ''}</td>
         <td class="row-actions">
           <button class="btn-complete" data-complete="${t.id}">完成</button>
           <button class="btn-edit" data-edit="${t.id}">編輯</button>
@@ -613,6 +636,7 @@ function openTaskModal(task){
     document.getElementById('f-engineer').value = task.engineer;
     document.getElementById('f-content').value = task.content;
     document.getElementById('f-date').value = task.assignDate;
+    document.getElementById('f-duedate').value = task.dueDate || '';
     document.getElementById('f-urgent').checked = !!task.urgent;
     document.getElementById('btn-delete-task').classList.remove('hidden');
   } else {
@@ -621,6 +645,7 @@ function openTaskModal(task){
     if(quickAddSystem) document.getElementById('f-system').value = quickAddSystem;
     document.getElementById('f-content').value = '';
     document.getElementById('f-date').value = todayStr();
+    document.getElementById('f-duedate').value = '';
     document.getElementById('f-urgent').checked = false;
     document.getElementById('btn-delete-task').classList.add('hidden');
   }
@@ -639,6 +664,7 @@ document.getElementById('btn-save-task').onclick = () => {
   const engineer = document.getElementById('f-engineer').value;
   const content = document.getElementById('f-content').value.trim();
   const assignDate = document.getElementById('f-date').value || todayStr();
+  const dueDate = document.getElementById('f-duedate').value || null;
   const urgent = document.getElementById('f-urgent').checked;
 
   if(!content){
@@ -649,12 +675,12 @@ document.getElementById('btn-save-task').onclick = () => {
   let resultId;
   if(editingTaskId){
     const t = data.tasks.find(x => x.id === editingTaskId);
-    if(t){ t.system=system; t.engineer=engineer; t.content=content; t.assignDate=assignDate; t.urgent=urgent; }
+    if(t){ t.system=system; t.engineer=engineer; t.content=content; t.assignDate=assignDate; t.dueDate=dueDate; t.urgent=urgent; }
     resultId = editingTaskId;
   } else {
     const newTask = {
       id: data.nextId++,
-      system, engineer, content, assignDate, urgent,
+      system, engineer, content, assignDate, dueDate, urgent,
       completed:false, completeDate:null
     };
     data.tasks.push(newTask);
